@@ -10,10 +10,101 @@ from yescaptcha import YesCaptchaSolver, YesCaptchaSolverError
 API_BASE_URL = os.environ.get("API_BASE_URL", "")
 CLIENTT_KEY = os.environ.get("CLIENTT_KEY", "")
 NS_RANDOM = os.environ.get("NS_RANDOM", "true")
-NS_COOKIE = os.environ.get("NS_COOKIE", "")
-USER = os.environ.get("USER", "")
-PASS = os.environ.get("PASS", "")
 SOLVER_TYPE = os.environ.get("SOLVER_TYPE", "turnstile")
+
+def save_cookie_to_github_var(var_name: str, cookie: str):
+    """将Cookie保存到GitHub仓库变量中"""
+    import requests as py_requests
+    token = os.environ.get("GH_PAT")
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    if not token or not repo:
+        print("GH_PAT 或 GITHUB_REPOSITORY 未设置，跳过变量更新")
+        return
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json"
+    }
+
+    url_check = f"https://api.github.com/repos/{repo}/actions/variables/{var_name}"
+    url_create = f"https://api.github.com/repos/{repo}/actions/variables"
+
+    data = {"name": var_name, "value": cookie}
+
+    response = py_requests.patch(url_check, headers=headers, json=data)
+    if response.status_code == 204:
+        print(f"{var_name} 更新成功")
+    elif response.status_code == 404:
+        print(f"{var_name} 不存在，尝试创建...")
+        response = py_requests.post(url_create, headers=headers, json=data)
+        if response.status_code == 201:
+            print(f"{var_name} 创建成功")
+        else:
+            print("创建失败:", response.status_code, response.text)
+    else:
+        print("设置失败:", response.status_code, response.text)
+
+# 多账号支持
+def parse_multi_accounts():
+    """解析环境变量中的多账号信息，支持&和换行符作为分隔符"""
+    accounts = []
+    
+    # 获取所有可能的账号配置
+    all_users = []
+    all_passes = []
+    all_cookies = []
+    
+    # 解析USER/USER数字格式
+    base_user = os.environ.get("USER", "")
+    if base_user:
+        all_users.append(base_user)
+    
+    for i in range(1, 100):
+        user_key = f"USER{i}"
+        if user_key in os.environ and os.environ[user_key]:
+            all_users.append(os.environ[user_key])
+        else:
+            break
+    
+    # 解析PASS/PASS数字格式
+    base_pass = os.environ.get("PASS", "")
+    if base_pass:
+        all_passes.append(base_pass)
+    
+    for i in range(1, 100):
+        pass_key = f"PASS{i}"
+        if pass_key in os.environ and os.environ[pass_key]:
+            all_passes.append(os.environ[pass_key])
+        else:
+            break
+    
+    # 解析NS_COOKIE
+    cookie_str = os.environ.get("NS_COOKIE", "")
+    if cookie_str:
+        # 支持&和换行符作为分隔符
+        for separator in ["&", "\n"]:
+            if separator in cookie_str:
+                all_cookies = cookie_str.split(separator)
+                all_cookies = [c.strip() for c in all_cookies if c.strip()]
+                break
+        else:
+            all_cookies = [cookie_str]
+    
+    # 组合账号信息
+    # 1. 如果有cookie，先添加只有cookie的账号
+    for i, cookie in enumerate(all_cookies):
+        username = f"账号{i+1}" if i >= len(all_users) else all_users[i]
+        password = "" if i >= len(all_passes) else all_passes[i]
+        accounts.append({"user": username, "pass": password, "cookie": cookie})
+    
+    # 2. 如果有用户名密码但没有对应cookie的账号
+    for i in range(len(all_cookies), max(len(all_users), len(all_passes))):
+        if i < len(all_users) and all_users[i]:
+            username = all_users[i]
+            password = all_passes[i] if i < len(all_passes) else ""
+            accounts.append({"user": username, "pass": password, "cookie": ""})
+    
+    return accounts
 
 def load_send():
     global send
@@ -34,7 +125,7 @@ def load_send():
 load_send()
 
 
-def session_login():
+def session_login(username, password):
     # 根据环境变量选择使用哪个验证码解决器
     try:
         if SOLVER_TYPE.lower() == "yescaptcha":
@@ -91,8 +182,8 @@ def session_login():
     }
     
     data = {
-        "username": USER,
-        "password": PASS,
+        "username": username,
+        "password": password,
         "token": token,
         "source": "turnstile"
     }
@@ -119,8 +210,8 @@ def session_login():
         return None
 
 
-def sign():
-    if not NS_COOKIE:
+def sign(cookie):
+    if not cookie:
         print("请先设置Cookie")
         return "no_cookie", ""
         
@@ -129,7 +220,7 @@ def sign():
         'User-Agent': "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0",
         'origin': "https://www.nodeseek.com",
         'referer': "https://www.nodeseek.com/board",
-        'Cookie': NS_COOKIE
+        'Cookie': cookie
     }
 
     try:
@@ -158,40 +249,77 @@ def sign():
         return "error", str(e)
 
 if __name__ == "__main__":
-    # 尝试使用现有Cookie签到
-    sign_result, sign_message = "no_cookie", ""
+    # 解析多账号信息
+    accounts = parse_multi_accounts()
     
-    if NS_COOKIE:
-        sign_result, sign_message = sign()
-    
-    # 处理签到结果
-    if sign_result in ["success", "already_signed"]:
-        status = "签到成功" if sign_result == "success" else "今天已经签到过了"
-        print(status)
+    if not accounts:
+        print("未找到任何账号信息")
         if hadsend:
-            send("nodeseek签到", f"{sign_message}")
-    else:
-        # 签到失败或没有Cookie，尝试登录
-        if USER and PASS:
-            print("尝试登录获取新Cookie...")
-            cookie = session_login()
-            if cookie:
-                print("登录成功，使用新Cookie签到")
-                NS_COOKIE = cookie
-                sign_result, sign_message = sign()
-                
-                status = "签到成功" if sign_result in ["success", "already_signed"] else "签到失败"
-                print(status)
-                if hadsend:
-                    message = f"{sign_message}"
+            send("nodeseek签到", "未找到任何账号信息")
+        exit(0)
+    
+    # 存储所有账号的通知信息
+    all_messages = []
+    # 用于收集有效的Cookie
+    valid_cookies = []
+    
+    # 循环处理每个账号
+    for i, account in enumerate(accounts):
+        account_name = account["user"] if account["user"] else f"账号{i+1}"
+        print(f"\n===== 开始处理{account_name} =====")
+        
+        # 尝试使用现有Cookie签到
+        sign_result, sign_message = "no_cookie", ""
+        
+        if account["cookie"]:
+            sign_result, sign_message = sign(account["cookie"])
+        
+        # 处理签到结果
+        if sign_result in ["success", "already_signed"]:
+            status = "签到成功" if sign_result == "success" else "今天已经签到过了"
+            print(f"{account_name}: {status}")
+            all_messages.append(f"{account_name}: {sign_message}")
+            # 收集有效的Cookie
+            valid_cookies.append(account["cookie"])
+        else:
+            # 签到失败或没有Cookie，尝试登录
+            if account["user"] and account["pass"]:
+                print(f"{account_name}: 尝试登录获取新Cookie...")
+                cookie = session_login(account["user"], account["pass"])
+                if cookie:
+                    print(f"{account_name}: 登录成功，使用新Cookie签到")
+                    account["cookie"] = cookie
+                    sign_result, sign_message = sign(cookie)
+                    
+                    status = "签到成功" if sign_result in ["success", "already_signed"] else "签到失败"
+                    print(f"{account_name}: {status}")
+                    
+                    message = f"{account_name}: {sign_message}"
                     if sign_result in ["success", "already_signed"]:
                         message += f"\nCookie: {cookie}"
-                    send("nodeseek签到", message)
+                        # 收集新获取的有效Cookie
+                        valid_cookies.append(cookie)
+                    all_messages.append(message)
+                else:
+                    print(f"{account_name}: 登录失败")
+                    all_messages.append(f"{account_name}: 登录失败")
             else:
-                print("登录失败")
-                if hadsend:
-                    send("nodeseek登录", "登录失败")
-        else:
-            print("无法执行操作：没有有效Cookie且未设置用户名密码")
-            if hadsend:
-                send("nodeseek签到", "无法执行操作：没有有效Cookie且未设置用户名密码")
+                print(f"{account_name}: 无法执行操作：没有有效Cookie且未设置用户名密码")
+                all_messages.append(f"{account_name}: 无法执行操作：没有有效Cookie且未设置用户名密码")
+    
+    # 发送合并后的通知
+    if hadsend and all_messages:
+        send("nodeseek多账号签到", "\n\n".join(all_messages))
+    
+    # 保存所有有效Cookie到GitHub变量
+    if valid_cookies and os.environ.get("GITHUB_ACTIONS") == "true":
+        print("\n===== 保存Cookie到GitHub变量 =====")
+        combined_cookies = "&".join(valid_cookies)
+        print(f"共收集到{len(valid_cookies)}个有效Cookie")
+        
+        # 将Cookie保存到GitHub变量
+        try:
+            save_cookie_to_github_var("NS_COOKIE", combined_cookies)
+            print("Cookie已成功保存到GitHub变量")
+        except Exception as e:
+            print(f"保存Cookie时出现错误: {e}")
